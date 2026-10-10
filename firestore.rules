@@ -1,0 +1,113 @@
+rules_version = '2';
+
+// Firestore Security Rules for EventHub (project event-a1159).
+// Roles are read from users/{uid}.role, which only an admin (or the Admin SDK script)
+// can set. Students cannot choose their own role.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userProfile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function hasRole(role) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && userProfile().role == role
+        && userProfile().status != 'disabled';
+    }
+
+    function isAdmin() {
+      return hasRole('admin');
+    }
+
+    function isStudent() {
+      return hasRole('student');
+    }
+
+    function validRoll(r) {
+      return r is string && r.matches('^[A-Z0-9-]{4,20}$');
+    }
+
+    // ---- Users (profiles) ----
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isAdmin());
+
+      // Students may self-register exactly one profile, always as an active student.
+      // The role field can never be set to admin from the client.
+      allow create: if request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['fullName', 'rollNumber', 'email', 'role', 'status', 'createdAt'])
+        && request.resource.data.role == 'student'
+        && request.resource.data.status == 'active'
+        && request.resource.data.fullName is string
+        && request.resource.data.fullName.size() >= 2
+        && request.resource.data.fullName.size() <= 100
+        && validRoll(request.resource.data.rollNumber)
+        && request.resource.data.email is string;
+
+      // Only admins may change profiles (for example, disabling an account).
+      allow update, delete: if isAdmin();
+    }
+
+    // ---- Roll number reservations (enforces uniqueness) ----
+    // Document ID = roll number. Create-only, so a second student cannot take a roll number.
+    match /rollNumbers/{roll} {
+      // Signed-in users must be able to read here so the signup transaction can check existence.
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && validRoll(roll)
+        && request.resource.data.keys().hasOnly(['uid', 'createdAt'])
+        && request.resource.data.uid == request.auth.uid;
+      allow update: if false;
+      allow delete: if isAdmin();
+    }
+
+    // ---- Events ----
+    match /events/{eventId} {
+      allow read: if signedIn();
+
+      allow create: if isAdmin()
+        && request.resource.data.title is string
+        && request.resource.data.capacity is int
+        && request.resource.data.capacity >= 1
+        && request.resource.data.registeredCount == 0;
+
+      // Admins may edit details, but capacity can never drop below the current registration count.
+      // Students may only change registeredCount, by exactly +1 (register) or -1 (cancel),
+      // and never above capacity. These writes happen inside the registration transactions.
+      allow update: if (isAdmin()
+            && request.resource.data.capacity >= request.resource.data.registeredCount)
+        || (isStudent()
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['registeredCount'])
+            && (request.resource.data.registeredCount == resource.data.registeredCount + 1
+                || request.resource.data.registeredCount == resource.data.registeredCount - 1)
+            && request.resource.data.registeredCount >= 0
+            && request.resource.data.registeredCount <= resource.data.capacity);
+
+      allow delete: if isAdmin();
+    }
+
+    // ---- Registrations ----
+    // Document ID = "<eventId>_<uid>". Because the ID is deterministic, a second registration
+    // for the same student and event cannot be created: the create would hit an existing doc.
+    match /registrations/{regId} {
+      // resource == null covers transaction reads of a not-yet-existing registration.
+      allow read: if signedIn()
+        && (resource == null || resource.data.userId == request.auth.uid || isAdmin());
+
+      allow create: if isStudent()
+        && request.resource.data.userId == request.auth.uid
+        && regId == request.resource.data.eventId + '_' + request.auth.uid
+        && request.resource.data.keys().hasOnly(['eventId', 'userId', 'eventTitle', 'studentName', 'rollNumber', 'createdAt']);
+
+      allow update: if false;
+
+      allow delete: if isAdmin()
+        || (isStudent() && resource.data.userId == request.auth.uid);
+    }
+  }
+}
