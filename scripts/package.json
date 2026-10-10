@@ -1,0 +1,9 @@
+{
+  "name": "eventhub-admin-tools",
+  "private": true,
+  "type": "module",
+  "description": "Trusted server-side admin utilities. Run locally only; never deploy this folder to Hosting.",
+  "dependencies": {
+    "firebase-admin": "^12.3.0"
+  }
+}
